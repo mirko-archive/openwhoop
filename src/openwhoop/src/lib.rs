@@ -5,8 +5,10 @@ pub mod db {
     pub use openwhoop_db::*;
 }
 
+pub mod ble;
+
 mod device;
-pub use device::{HistorySyncConfig, WhoopDevice};
+pub use device::{HistorySyncConfig, WhoopDevice, WhoopDeviceWith};
 
 mod openwhoop;
 pub use openwhoop::OpenWhoop;

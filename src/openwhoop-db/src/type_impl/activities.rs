@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use openwhoop_entities::activities;
+use openwhoop_entities::{activities, sleep_cycles};
 use openwhoop_types::activities::{ActivityPeriod, ActivityType, SearchActivityPeriods};
 use sea_orm::{
     ColumnTrait, Condition, EntityTrait, NotSet, QueryFilter, QueryOrder, Set,
@@ -11,12 +11,23 @@ use crate::DatabaseHandler;
 
 impl DatabaseHandler {
     pub async fn create_activity(&self, activity: ActivityPeriod) -> anyhow::Result<()> {
+        if activity.to <= activity.from {
+            return Ok(());
+        }
+
+        if self.activity_overlaps_existing(activity).await?
+            || self.activity_overlaps_sleep(activity).await?
+        {
+            return Ok(());
+        }
+
         let model = activities::ActiveModel {
             id: NotSet,
             period_id: Set(activity.period_id),
             start: Set(activity.from),
             end: Set(activity.to),
             activity: Set(activity.activity.to_string()),
+            strain: Set(activity.strain),
             synced: NotSet,
         };
 
@@ -25,6 +36,7 @@ impl DatabaseHandler {
                 OnConflict::column(activities::Column::Start)
                     .update_column(activities::Column::End)
                     .update_column(activities::Column::Activity)
+                    .update_column(activities::Column::Strain)
                     .to_owned(),
             )
             .exec(&self.db)
@@ -32,6 +44,33 @@ impl DatabaseHandler {
 
         Ok(())
     }
+
+    async fn activity_overlaps_existing(&self, activity: ActivityPeriod) -> anyhow::Result<bool> {
+        Ok(activities::Entity::find()
+            .filter(overlap_condition(
+                activities::Column::Start,
+                activities::Column::End,
+                activity.from,
+                activity.to,
+            ))
+            .one(&self.db)
+            .await?
+            .is_some())
+    }
+
+    async fn activity_overlaps_sleep(&self, activity: ActivityPeriod) -> anyhow::Result<bool> {
+        Ok(sleep_cycles::Entity::find()
+            .filter(overlap_condition(
+                sleep_cycles::Column::Start,
+                sleep_cycles::Column::End,
+                activity.from,
+                activity.to,
+            ))
+            .one(&self.db)
+            .await?
+            .is_some())
+    }
+
     pub async fn search_activities(
         &self,
         options: SearchActivityPeriods,
@@ -62,6 +101,7 @@ fn map_activity_period(value: activities::Model) -> ActivityPeriod {
         from: value.start,
         to: value.end,
         activity: ActivityType::from_str(value.activity.as_str()).unwrap(),
+        strain: value.strain,
     }
 }
 
@@ -76,6 +116,20 @@ fn search_activity_periods_query(query: SearchActivityPeriods) -> Condition {
         )
 }
 
+fn overlap_condition<C>(
+    start_column: C,
+    end_column: C,
+    from: chrono::NaiveDateTime,
+    to: chrono::NaiveDateTime,
+) -> Condition
+where
+    C: ColumnTrait,
+{
+    Condition::all()
+        .add(start_column.lt(to))
+        .add(end_column.gt(from))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +142,7 @@ mod tests {
             from: base.and_hms_opt(hour, 0, 0).unwrap(),
             to: base.and_hms_opt(hour + 1, 0, 0).unwrap(),
             activity: ActivityType::Running,
+            strain: None,
         }
     }
 
@@ -105,10 +160,12 @@ mod tests {
                 .and_hms_opt(9, 0, 0)
                 .unwrap(),
             activity: "Running".to_string(),
+            strain: Some(7.25),
             synced: false,
         };
         let period = map_activity_period(model);
         assert!(matches!(period.activity, ActivityType::Running));
+        assert_eq!(period.strain, Some(7.25));
     }
 
     #[test]
@@ -190,5 +247,96 @@ mod tests {
 
         let latest = db.get_latest_activity().await.unwrap().unwrap();
         assert_eq!(latest.from.hour(), 14);
+    }
+
+    #[tokio::test]
+    async fn create_activity_skips_overlap_with_existing_activity() {
+        let db = DatabaseHandler::new("sqlite::memory:").await;
+
+        let sleep_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        db.create_sleep(openwhoop_algos::SleepCycle {
+            id: sleep_date,
+            start: NaiveDate::from_ymd_opt(2024, 12, 31)
+                .unwrap()
+                .and_hms_opt(22, 0, 0)
+                .unwrap(),
+            end: sleep_date.and_hms_opt(6, 0, 0).unwrap(),
+            min_bpm: 50,
+            max_bpm: 70,
+            avg_bpm: 60,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: 100.0,
+        })
+        .await
+        .unwrap();
+
+        db.create_activity(ActivityPeriod {
+            period_id: sleep_date,
+            from: sleep_date.and_hms_opt(8, 0, 0).unwrap(),
+            to: sleep_date.and_hms_opt(9, 0, 0).unwrap(),
+            activity: ActivityType::Running,
+            strain: None,
+        })
+        .await
+        .unwrap();
+
+        db.create_activity(ActivityPeriod {
+            period_id: sleep_date,
+            from: sleep_date.and_hms_opt(8, 30, 0).unwrap(),
+            to: sleep_date.and_hms_opt(9, 30, 0).unwrap(),
+            activity: ActivityType::Cycling,
+            strain: None,
+        })
+        .await
+        .unwrap();
+
+        let results = db
+            .search_activities(SearchActivityPeriods::default())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].activity, ActivityType::Running));
+    }
+
+    #[tokio::test]
+    async fn create_activity_skips_overlap_with_sleep() {
+        let db = DatabaseHandler::new("sqlite::memory:").await;
+
+        let sleep_date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+        db.create_sleep(openwhoop_algos::SleepCycle {
+            id: sleep_date,
+            start: NaiveDate::from_ymd_opt(2025, 1, 1)
+                .unwrap()
+                .and_hms_opt(22, 0, 0)
+                .unwrap(),
+            end: sleep_date.and_hms_opt(6, 0, 0).unwrap(),
+            min_bpm: 50,
+            max_bpm: 70,
+            avg_bpm: 60,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: 100.0,
+        })
+        .await
+        .unwrap();
+
+        db.create_activity(ActivityPeriod {
+            period_id: sleep_date,
+            from: sleep_date.and_hms_opt(5, 30, 0).unwrap(),
+            to: sleep_date.and_hms_opt(6, 30, 0).unwrap(),
+            activity: ActivityType::Running,
+            strain: None,
+        })
+        .await
+        .unwrap();
+
+        let results = db
+            .search_activities(SearchActivityPeriods::default())
+            .await
+            .unwrap();
+        assert!(results.is_empty());
     }
 }

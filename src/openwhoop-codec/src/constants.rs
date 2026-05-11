@@ -1,6 +1,8 @@
-#![allow(unused)]
-
+use std::{fmt::Display, str::FromStr};
+use serde::{Deserialize, Serialize};
 use uuid::{Uuid, uuid};
+
+use crate::WhoopError;
 
 // WHOOP Gen 4 (Harvard)
 pub const WHOOP_SERVICE_GEN4: Uuid = uuid!("61080001-8d6d-82b8-614a-1c8cb0f8dcc6");
@@ -25,6 +27,51 @@ pub enum WhoopGeneration {
     Placeholder,
     Gen4,
     Gen5,
+}
+
+impl Display for WhoopGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let e = match self {
+            Self::Gen4 => " 4.0",
+            Self::Gen5 => " 5.0",
+            Self::Placeholder => "",
+        };
+
+        write!(f, "WHOOP{}", e)
+    }
+}
+
+impl FromStr for WhoopGeneration {
+    type Err = WhoopError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "WHOOP" => Ok(Self::Placeholder),
+            "WHOOP 4.0" | "WHOOP 4" => Ok(Self::Gen4),
+            "WHOOP 5.0" | "WHOOP 5" => Ok(Self::Gen5),
+            _ => Err(WhoopError::InvalidGeneration),
+        }
+    }
+}
+
+impl Serialize for WhoopGeneration {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for WhoopGeneration {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(D::Error::custom)
+    }
 }
 
 impl WhoopGeneration {

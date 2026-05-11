@@ -36,9 +36,9 @@ Use `set-whoop <whoop>` and `set-remote <remote>` to save defaults into `~/.open
 | `sleep-stats` | Print sleep statistics (all-time and last 7 days) |
 | `exercise-stats` | Print exercise statistics (all-time and last 7 days) |
 | `calculate-stress` | Calculate stress scores (Baevsky stress index) |
-| `calculate-spo2` | Calculate blood oxygen from raw sensor data |
-| `calculate-skin-temp` | Calculate skin temperature from raw sensor data |
 | `set-alarm <time>` | Set device alarm (see [Alarm Formats](#alarm-formats)) |
+| `stream-hr` | Stream realtime heart rate |
+| `stream-stress` | Stream realtime stress from the live HR feed |
 | `sync` | Sync data between local and remote databases |
 | `merge <database_url>` | Copy packets from another database into the current one |
 | `rerun` | Reprocess stored packets (useful after adding new packet handlers) |
@@ -48,6 +48,8 @@ Use `set-whoop <whoop>` and `set-remote <remote>` to save defaults into `~/.open
 | `restart` | Restart device |
 | `erase` | Erase all history data from device |
 | `completions <shell>` | Generate shell completions (bash, zsh, fish) |
+
+`stream-stress` uses the same realtime HR notifications as `stream-hr` and starts scoring after a small initial buffer, becoming more stable as more samples arrive.
 
 ### Alarm Formats
 
@@ -102,6 +104,52 @@ QUERY = "SELECT time, bpm FROM heart_rate"
 PREFIX = "sqlite:///"  # Use "sqlite:///../" if working from notebooks/
 DATABASE_URL = os.getenv("DATABASE_URL").replace("sqlite://", PREFIX)
 df = pd.read_sql(QUERY, DATABASE_URL)
+```
+
+## Tauri BLEC Backend
+
+The Rust library can use `tauri-plugin-blec` instead of a direct `btleplug::Peripheral` when built with the optional `tauri-blec` feature:
+
+```toml
+openwhoop = { path = "../openwhoop-v2/src/openwhoop", features = ["tauri-blec"] }
+tauri-plugin-blec = "0.8.1"
+```
+
+Register `tauri_plugin_blec::init()` in your Tauri builder, then create an OpenWhoop device from the plugin handler:
+
+On Linux, compiling this feature also requires the normal Tauri/WebKitGTK development packages installed on the build machine.
+
+```rust
+use std::{
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
+
+use openwhoop::{
+    HistorySyncConfig, WhoopDeviceWith,
+    ble::tauri_blec::{TauriBlecTransport, scan_tauri_blec_devices},
+    db::DatabaseHandler,
+};
+
+async fn sync_from_tauri_blec(db: DatabaseHandler) -> anyhow::Result<()> {
+    let handler = tauri_plugin_blec::get_handler()?;
+    let devices = scan_tauri_blec_devices(handler, Duration::from_secs(5), false).await?;
+    let device = devices
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no WHOOP device found"))?;
+
+    let transport = TauriBlecTransport::new(handler, device.address, false);
+    let mut whoop = WhoopDeviceWith::from_transport(transport, db, false, device.generation);
+    whoop.connect().await?;
+    whoop.initialize().await?;
+    whoop
+        .sync_history(
+            Arc::new(AtomicBool::new(false)),
+            HistorySyncConfig::default(),
+        )
+        .await
+}
 ```
 
 ## Protocol
@@ -175,8 +223,8 @@ The remaining sensor fields in each packet (which the original blog post marked 
 ## TODO
 
 - [x] Sleep detection and activity detection
-- [x] SpO2 readings
-- [x] Temperature readings
+- [ ] SpO2 readings
+- [ ] Temperature readings
 - [x] Stress calculation (Baevsky stress index)
 - [x] HRV analysis (RMSSD)
 - [x] Strain scoring (Edwards TRIMP)

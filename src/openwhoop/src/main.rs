@@ -113,14 +113,6 @@ pub enum OpenWhoopCommand {
     ///
     CalculateStress,
     ///
-    /// Calculate SpO2 from raw sensor data
-    ///
-    CalculateSpo2,
-    ///
-    /// Calculate skin temperature from raw sensor data
-    ///
-    CalculateSkinTemp,
-    ///
     /// Set alarm
     ///
     SetAlarm {
@@ -132,6 +124,13 @@ pub enum OpenWhoopCommand {
     /// Stream realtime heart rate
     ///
     StreamHr {
+        #[arg(long, env)]
+        whoop: DeviceId,
+    },
+    ///
+    /// Stream realtime stress derived from the live HR feed
+    ///
+    StreamStress {
         #[arg(long, env)]
         whoop: DeviceId,
     },
@@ -374,6 +373,7 @@ fn resolve_database_url(database_url: Option<String>) -> anyhow::Result<String> 
         .ok_or_else(|| anyhow!("DATABASE_URL is not set and HOME is unavailable"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_firmware(
     email: &str,
     password: &str,
@@ -684,7 +684,7 @@ impl OpenWhoopCli {
                 }
             }
             OpenWhoopCommand::ReRun => {
-                let mut whoop = OpenWhoop::new(db_handler.clone(), WhoopGeneration::Gen4);
+                let mut whoop = OpenWhoop::new(db_handler.clone(), WhoopGeneration::Placeholder);
                 let mut id = 0;
                 loop {
                     let packets = db_handler.get_packets(id).await?;
@@ -761,14 +761,6 @@ impl OpenWhoopCli {
                 let whoop = OpenWhoop::new(db_handler, WhoopGeneration::Placeholder);
                 whoop.calculate_stress().await?;
             }
-            OpenWhoopCommand::CalculateSpo2 => {
-                let whoop = OpenWhoop::new(db_handler, WhoopGeneration::Placeholder);
-                whoop.calculate_spo2().await?;
-            }
-            OpenWhoopCommand::CalculateSkinTemp => {
-                let whoop = OpenWhoop::new(db_handler, WhoopGeneration::Placeholder);
-                whoop.calculate_skin_temp().await?;
-            }
             OpenWhoopCommand::SetAlarm { whoop, alarm_time } => {
                 let (peripheral, generation) = scan_command(&adapter, Some(whoop)).await?;
                 let mut whoop = WhoopDevice::new(
@@ -814,6 +806,23 @@ impl OpenWhoopCli {
                 })?;
                 whoop.connect().await?;
                 whoop.stream_hr(should_exit).await?;
+            }
+            OpenWhoopCommand::StreamStress { whoop } => {
+                let (peripheral, generation) = scan_command(&adapter, Some(whoop)).await?;
+                let mut whoop = WhoopDevice::new(
+                    peripheral,
+                    adapter,
+                    db_handler,
+                    self.debug_packets,
+                    generation,
+                );
+                let should_exit = Arc::new(AtomicBool::new(false));
+                let se = should_exit.clone();
+                ctrlc::set_handler(move || {
+                    se.store(true, Ordering::SeqCst);
+                })?;
+                whoop.connect().await?;
+                whoop.stream_stress(should_exit).await?;
             }
             OpenWhoopCommand::RingAlarm { whoop } => {
                 let (peripheral, generation) = scan_command(&adapter, Some(whoop)).await?;

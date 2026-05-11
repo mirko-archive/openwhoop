@@ -1,9 +1,9 @@
-use chrono::NaiveDateTime;
+use chrono::{NaiveDateTime, TimeDelta};
 use openwhoop_algos::SleepCycle;
 use openwhoop_entities::sleep_cycles;
 use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder};
 
-use crate::DatabaseHandler;
+use crate::{DailyStats, DailyStatsAverage, DatabaseHandler};
 
 impl DatabaseHandler {
     pub async fn get_sleep_cycles(
@@ -20,6 +20,76 @@ impl DatabaseHandler {
             .into_iter()
             .map(map_sleep_cycle)
             .collect())
+    }
+
+    pub async fn get_latest_daily_stats(&self) -> anyhow::Result<Option<DailyStats>> {
+        let Some(sleep) = self.get_latest_sleep().await? else {
+            return Ok(None);
+        };
+
+        self.get_daily_stats_for_sleep(sleep).await.map(Some)
+    }
+
+    pub async fn get_last_7_day_daily_stats_average(&self) -> anyhow::Result<DailyStatsAverage> {
+        let Some(latest_sleep) = self.get_latest_sleep().await? else {
+            return Ok(DailyStatsAverage::MissingDays(7));
+        };
+
+        let window_start = latest_sleep.id - TimeDelta::days(6);
+        let sleeps = sleep_cycles::Entity::find()
+            .filter(sleep_cycles::Column::SleepId.gte(window_start))
+            .filter(sleep_cycles::Column::SleepId.lte(latest_sleep.id))
+            .order_by_asc(sleep_cycles::Column::SleepId)
+            .all(&self.db)
+            .await?;
+
+        let missing_days = 7usize.saturating_sub(sleeps.len());
+        if missing_days > 0 {
+            return Ok(DailyStatsAverage::MissingDays(
+                u8::try_from(missing_days).unwrap_or(u8::MAX),
+            ));
+        }
+
+        let expected_dates = (0..7).map(|offset| window_start + TimeDelta::days(offset));
+        let actual_dates = sleeps.iter().map(|sleep| sleep.sleep_id);
+        let contiguous_days = expected_dates
+            .zip(actual_dates)
+            .all(|(expected, actual)| expected == actual);
+        if !contiguous_days {
+            let distinct_dates = sleeps
+                .iter()
+                .filter(|sleep| sleep.sleep_id >= window_start && sleep.sleep_id <= latest_sleep.id)
+                .count();
+            let missing = 7usize.saturating_sub(distinct_dates);
+            return Ok(DailyStatsAverage::MissingDays(
+                u8::try_from(missing).unwrap_or(u8::MAX),
+            ));
+        }
+
+        let mut hrv_sum = 0.0;
+        let mut rhr_sum = 0.0;
+
+        for sleep in sleeps.into_iter().map(map_sleep_cycle) {
+            let stats = self.get_daily_stats_for_sleep(sleep).await?;
+            if let Some(hrv) = stats.hrv {
+                hrv_sum += hrv;
+            }
+            if let Some(rhr) = stats.rhr {
+                rhr_sum += rhr;
+            }
+        }
+
+        Ok(DailyStatsAverage::Average(DailyStats {
+            hrv: Some(hrv_sum / 7.0),
+            rhr: Some(rhr_sum / 7.0),
+        }))
+    }
+
+    async fn get_daily_stats_for_sleep(&self, sleep: SleepCycle) -> anyhow::Result<DailyStats> {
+        Ok(DailyStats {
+            hrv: Some(f64::from(sleep.avg_hrv)),
+            rhr: Some(f64::from(sleep.avg_bpm)),
+        })
     }
 }
 

@@ -21,6 +21,24 @@ impl SearchHistory {
 }
 
 impl DatabaseHandler {
+    pub async fn get_latest_reading_time(&self) -> anyhow::Result<Option<NaiveDateTime>> {
+        Ok(heart_rate::Entity::find()
+            .select_only()
+            .expr(heart_rate::Column::Time.max())
+            .into_tuple()
+            .one(&self.db)
+            .await?)
+    }
+
+    pub async fn get_earliest_reading_time(&self) -> anyhow::Result<Option<NaiveDateTime>> {
+        Ok(heart_rate::Entity::find()
+            .select_only()
+            .expr(heart_rate::Column::Time.min())
+            .into_tuple()
+            .one(&self.db)
+            .await?)
+    }
+
     pub async fn search_history(
         &self,
         options: SearchHistory,

@@ -1,5 +1,4 @@
 use anyhow::{Context, anyhow, bail};
-use btleplug::api::ValueNotification;
 use chrono::{DateTime, Local};
 use futures::{Stream, StreamExt};
 use openwhoop_codec::{
@@ -15,33 +14,58 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
-use super::{HistorySyncConfig, WhoopDevice};
+use crate::ble::{BleNotification, WhoopBleTransport};
 
-pub(super) struct Gen5HistorySync<'a, S>
+use super::{HistorySyncConfig, WhoopDeviceWith};
+
+enum NextPacketError {
+    IdleTimeout(Duration),
+    Other(anyhow::Error),
+}
+
+impl NextPacketError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::IdleTimeout(wait_for) => {
+                anyhow!(
+                    "No incoming packets for {:.1}s (idle timeout)",
+                    wait_for.as_secs_f32()
+                )
+            }
+            Self::Other(err) => err,
+        }
+    }
+}
+
+pub(super) struct Gen5HistorySync<'a, T, S>
 where
-    S: Stream<Item = ValueNotification> + Unpin,
+    T: WhoopBleTransport,
+    S: Stream<Item = BleNotification> + Unpin,
 {
-    device: &'a mut WhoopDevice,
+    device: &'a mut WhoopDeviceWith<T>,
     should_exit: Arc<AtomicBool>,
     notifications: S,
     config: HistorySyncConfig,
     queued_packets: VecDeque<WhoopPacket>,
     pending_readings: Vec<HistoryReading>,
     saw_stream_activity: bool,
+    saw_non_history_packets: bool,
+    recovery_attempted: bool,
     history_complete: bool,
     history_started: bool,
     last_range_info: Option<DataRangeInfo>,
     get_data_range_warned_short: bool,
 }
 
-impl<'a, S> Gen5HistorySync<'a, S>
+impl<'a, T, S> Gen5HistorySync<'a, T, S>
 where
-    S: Stream<Item = ValueNotification> + Unpin,
+    T: WhoopBleTransport,
+    S: Stream<Item = BleNotification> + Unpin,
 {
     pub(super) fn new(
-        device: &'a mut WhoopDevice,
+        device: &'a mut WhoopDeviceWith<T>,
         should_exit: Arc<AtomicBool>,
         notifications: S,
         config: HistorySyncConfig,
@@ -54,6 +78,8 @@ where
             queued_packets: VecDeque::new(),
             pending_readings: Vec::new(),
             saw_stream_activity: false,
+            saw_non_history_packets: false,
+            recovery_attempted: false,
             history_complete: false,
             history_started: false,
             last_range_info: None,
@@ -66,15 +92,39 @@ where
 
         if let Err(err) = result {
             if self.history_started {
-                warn!("Gen5 history transfer failed; sending best-effort failure and abort: {err}");
-                let _ = self
-                    .device
-                    .send_command(WhoopPacket::history_end_failure())
-                    .await;
-                let _ = self
-                    .device
-                    .send_command(WhoopPacket::abort_historical_transmits())
-                    .await;
+                match self.device.is_connected().await {
+                    Ok(false) => {
+                        warn!(
+                            "Gen5 history transfer failed after disconnect; skipping best-effort failure and abort: {err}"
+                        );
+                    }
+                    Ok(true) => {
+                        warn!(
+                            "Gen5 history transfer failed; sending best-effort failure and abort: {err}"
+                        );
+                        let _ = self
+                            .device
+                            .send_command(WhoopPacket::history_end_failure())
+                            .await;
+                        let _ = self
+                            .device
+                            .send_command(WhoopPacket::abort_historical_transmits())
+                            .await;
+                    }
+                    Err(check_err) => {
+                        warn!(
+                            "Gen5 history transfer failed; connection check failed ({check_err}), attempting best-effort failure and abort: {err}"
+                        );
+                        let _ = self
+                            .device
+                            .send_command(WhoopPacket::history_end_failure())
+                            .await;
+                        let _ = self
+                            .device
+                            .send_command(WhoopPacket::abort_historical_transmits())
+                            .await;
+                    }
+                }
             }
             return Err(err);
         }
@@ -127,7 +177,7 @@ where
             );
         }
 
-        let started_at = Instant::now();
+        let mut started_at = Instant::now();
         while !self.should_exit.load(Ordering::SeqCst) {
             let elapsed = started_at.elapsed();
             if let Some(stream_timeout) = stream_timeout {
@@ -149,7 +199,43 @@ where
             let packet = match self.next_packet(wait_for).await {
                 Ok(Some(packet)) => packet,
                 Ok(None) => break,
-                Err(_) if !self.saw_stream_activity => {
+                Err(NextPacketError::IdleTimeout(_))
+                    if self.retry_after_idle_timeout(COMMAND_TIMEOUT).await? =>
+                {
+                    started_at = Instant::now();
+                    continue;
+                }
+                Err(NextPacketError::IdleTimeout(_)) if !self.saw_stream_activity => {
+                    if self.saw_non_history_packets {
+                        if let Some(range) = self.last_range_info {
+                            bail!(
+                                "Received non-historical packets after SendHistoricalData but no history rows/metadata; data_range_distance={} (start={}, end={}, rollover={})",
+                                range.distance,
+                                range.start,
+                                range.end,
+                                range.rollover
+                            );
+                        }
+                        bail!(
+                            "Received non-historical packets after SendHistoricalData but no history rows/metadata"
+                        );
+                    }
+
+                    if self.recovery_attempted {
+                        if let Some(range) = self.last_range_info {
+                            bail!(
+                                "No historical packets observed after SendHistoricalData even after abort/retry; data_range_distance={} (start={}, end={}, rollover={})",
+                                range.distance,
+                                range.start,
+                                range.end,
+                                range.rollover
+                            );
+                        }
+                        bail!(
+                            "No historical packets observed after SendHistoricalData even after abort/retry"
+                        );
+                    }
+
                     if let Some(range) = self.last_range_info {
                         info!(
                             "No historical packets observed after SendHistoricalData; data_range_distance={} (start={}, end={}, rollover={})",
@@ -162,16 +248,25 @@ where
                     }
                     break;
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    self.persist_pending_readings(
+                        "failed to persist trailing historical readings after transfer error",
+                    )
+                    .await?;
+                    return Err(err.into_anyhow());
+                }
             };
 
             let Ok(data) = WhoopData::from_packet_gen5(packet) else {
+                self.saw_non_history_packets = true;
                 trace!("Unhandled Gen5 packet during history transfer");
                 continue;
             };
 
             match data {
-                WhoopData::CommandResponse(_) => {}
+                WhoopData::CommandResponse(_) => {
+                    self.saw_non_history_packets = true;
+                }
                 WhoopData::HistoryMetadata { cmd, end_data, .. } => {
                     self.saw_stream_activity = true;
                     match cmd {
@@ -180,12 +275,10 @@ where
                         }
                         MetadataType::HistoryEnd => {
                             if !self.pending_readings.is_empty() {
-                                self.device
-                                    .whoop
-                                    .database
-                                    .create_readings(std::mem::take(&mut self.pending_readings))
-                                    .await
-                                    .context("failed to persist historical readings")?;
+                                self.persist_pending_readings(
+                                    "failed to persist historical readings",
+                                )
+                                .await?;
                             }
 
                             match self
@@ -231,18 +324,20 @@ where
                     info!(target: "HistoryReading", "time: {}", ptime);
                     self.pending_readings.push(reading);
                 }
-                _ => {}
+                WhoopData::ConsoleLog { .. }
+                | WhoopData::RunAlarm { .. }
+                | WhoopData::Event { .. }
+                | WhoopData::UnknownEvent { .. }
+                | WhoopData::VersionInfo { .. }
+                | WhoopData::RealtimeHr { .. }
+                | WhoopData::AlarmInfo { .. } => {
+                    self.saw_non_history_packets = true;
+                }
             }
         }
 
-        if !self.pending_readings.is_empty() {
-            self.device
-                .whoop
-                .database
-                .create_readings(std::mem::take(&mut self.pending_readings))
-                .await
-                .context("failed to persist trailing historical readings")?;
-        }
+        self.persist_pending_readings("failed to persist trailing historical readings")
+            .await?;
 
         if self.should_exit.load(Ordering::SeqCst) {
             return Ok(());
@@ -253,6 +348,94 @@ where
         }
 
         Ok(())
+    }
+
+    async fn retry_after_idle_timeout(
+        &mut self,
+        command_timeout: Duration,
+    ) -> anyhow::Result<bool> {
+        if self.recovery_attempted || self.should_exit.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+
+        self.recovery_attempted = true;
+        self.persist_pending_readings(
+            "failed to persist trailing historical readings before recovery retry",
+        )
+        .await?;
+
+        if let Some(range) = self.last_range_info {
+            warn!(
+                "Gen5 history sync stalled; aborting and retrying once (data_range_distance={} start={} end={} rollover={})",
+                range.distance, range.start, range.end, range.rollover
+            );
+        } else {
+            warn!("Gen5 history sync stalled; aborting and retrying once");
+        }
+
+        self.queued_packets.clear();
+
+        match self
+            .send_command_wait_response(
+                WhoopPacket::abort_historical_transmits(),
+                command_timeout,
+                false,
+            )
+            .await
+        {
+            Ok(resp) if matches!(resp.result, 1 | 2) => {}
+            Ok(resp) => {
+                warn!(
+                    "AbortHistoricalTransmits ack returned {} ({}) during recovery retry",
+                    resp.result,
+                    resp.result_name()
+                );
+            }
+            Err(err) => {
+                warn!("AbortHistoricalTransmits failed during recovery retry: {err}");
+            }
+        }
+
+        sleep(Duration::from_secs(3)).await;
+
+        let start = self
+            .send_command_wait_response(WhoopPacket::history_start_gen5(), command_timeout, false)
+            .await?;
+
+        if !matches!(start.result, 1 | 2) {
+            bail!(
+                "SendHistoricalData rejected during recovery retry: {} ({})",
+                start.result,
+                start.result_name()
+            );
+        }
+
+        Ok(true)
+    }
+
+    async fn persist_pending_readings(&mut self, context: &'static str) -> anyhow::Result<()> {
+        if self.pending_readings.is_empty() {
+            return Ok(());
+        }
+
+        self.device
+            .whoop
+            .database
+            .create_readings(std::mem::take(&mut self.pending_readings))
+            .await
+            .context(context)?;
+
+        Ok(())
+    }
+
+    async fn stream_closed_error(&mut self, phase: &'static str) -> anyhow::Error {
+        match self.device.is_connected().await {
+            Ok(false) => anyhow!("Whoop disconnected while {phase}"),
+            Ok(true) => anyhow!("notification stream ended unexpectedly while {phase}"),
+            Err(err) => anyhow!(
+                "notification stream ended unexpectedly while {phase}; failed to determine connection state: {err}"
+            ),
+        }
     }
 
     async fn send_command_wait_response(
@@ -280,16 +463,24 @@ where
             }
 
             let wait_for = deadline.saturating_duration_since(now);
-            let notification = timeout(wait_for, self.notifications.next())
-                .await
-                .map_err(|_| {
-                    anyhow!(
-                        "timed out waiting for command response cmd={} seq={}",
-                        expected_cmd,
-                        expected_seq
-                    )
-                })?
-                .ok_or_else(|| anyhow!("notification stream ended unexpectedly"))?;
+            let notification =
+                timeout(wait_for, self.notifications.next())
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "timed out waiting for command response cmd={} seq={}",
+                            expected_cmd,
+                            expected_seq
+                        )
+                    })?;
+            let notification = match notification {
+                Some(notification) => notification,
+                None => {
+                    return Err(self
+                        .stream_closed_error("waiting for a command response")
+                        .await);
+                }
+            };
 
             let Some(packet) = self.decode_notification(notification).await? else {
                 continue;
@@ -317,7 +508,7 @@ where
 
     async fn decode_notification(
         &self,
-        notification: ValueNotification,
+        notification: BleNotification,
     ) -> anyhow::Result<Option<WhoopPacket>> {
         let packet = self.device.notification_to_model(notification).await?;
         match packet.uuid {
@@ -337,7 +528,10 @@ where
         }
     }
 
-    async fn next_packet(&mut self, wait_for: Duration) -> anyhow::Result<Option<WhoopPacket>> {
+    async fn next_packet(
+        &mut self,
+        wait_for: Duration,
+    ) -> Result<Option<WhoopPacket>, NextPacketError> {
         if let Some(packet) = self.queued_packets.pop_front() {
             return Ok(Some(packet));
         }
@@ -346,25 +540,26 @@ where
         loop {
             let now = Instant::now();
             if now >= deadline {
-                bail!(
-                    "No incoming packets for {:.1}s (idle timeout)",
-                    wait_for.as_secs_f32()
-                );
+                return Err(NextPacketError::IdleTimeout(wait_for));
             }
 
             let remaining = deadline.saturating_duration_since(now);
             let notification = match timeout(remaining, self.notifications.next()).await {
                 Ok(Some(notification)) => notification,
-                Ok(None) => return Ok(None),
-                Err(_) => {
-                    bail!(
-                        "No incoming packets for {:.1}s (idle timeout)",
-                        wait_for.as_secs_f32()
-                    )
+                Ok(None) => {
+                    return Err(NextPacketError::Other(
+                        self.stream_closed_error("receiving historical packets")
+                            .await,
+                    ));
                 }
+                Err(_) => return Err(NextPacketError::IdleTimeout(wait_for)),
             };
 
-            if let Some(packet) = self.decode_notification(notification).await? {
+            if let Some(packet) = self
+                .decode_notification(notification)
+                .await
+                .map_err(NextPacketError::Other)?
+            {
                 return Ok(Some(packet));
             }
         }

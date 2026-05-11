@@ -1,5 +1,3 @@
 mod sleep;
-mod spo2;
+mod strain;
 mod stress;
-mod temperature;
-pub use temperature::TempReading;
