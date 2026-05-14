@@ -871,12 +871,15 @@ impl OpenWhoopCli {
 
                     for packets::Model {
                         uuid,
+                        generation,
                         bytes,
                         id: c_id,
                     } in packets
                     {
                         id = c_id;
-                        db_handler.create_packet(uuid, bytes).await?;
+                        db_handler
+                            .create_packet(uuid, generation.parse()?, bytes)
+                            .await?;
                     }
 
                     println!("{}", id);

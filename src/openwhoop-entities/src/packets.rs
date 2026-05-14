@@ -8,6 +8,7 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub uuid: Uuid,
+    pub generation: String,
     #[sea_orm(column_type = "Binary(1)")]
     pub bytes: Vec<u8>,
 }

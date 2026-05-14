@@ -42,7 +42,7 @@ impl OpenWhoop {
     ) -> anyhow::Result<packets::Model> {
         let packet = self
             .database
-            .create_packet(notification.uuid, notification.value)
+            .create_packet(notification.uuid, self.generation, notification.value)
             .await?;
 
         Ok(packet)
@@ -52,13 +52,41 @@ impl OpenWhoop {
         &mut self,
         packet: packets::Model,
     ) -> anyhow::Result<Option<WhoopPacket>> {
-        let parse_packet = match self.generation {
-            WhoopGeneration::Placeholder => todo!(),
+        let generation = if matches!(self.generation, WhoopGeneration::Placeholder) {
+            packet
+                .generation
+                .parse()
+                .ok()
+                .or_else(|| match packet.uuid {
+                    DATA_FROM_STRAP_GEN4 | CMD_FROM_STRAP_GEN4 => Some(WhoopGeneration::Gen4),
+                    DATA_FROM_STRAP_GEN5 | CMD_FROM_STRAP_GEN5 => Some(WhoopGeneration::Gen5),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unable to determine packet generation for row {}",
+                        packet.id
+                    )
+                })?
+        } else {
+            self.generation
+        };
+
+        let parse_packet = match generation {
+            WhoopGeneration::Placeholder => {
+                return Err(anyhow::anyhow!(
+                    "cannot decode packets with placeholder generation"
+                ));
+            }
             WhoopGeneration::Gen4 => WhoopPacket::from_data,
             WhoopGeneration::Gen5 => WhoopPacket::from_data_maverick,
         };
-        let data_from_packet = match self.generation {
-            WhoopGeneration::Placeholder => todo!(),
+        let data_from_packet = match generation {
+            WhoopGeneration::Placeholder => {
+                return Err(anyhow::anyhow!(
+                    "cannot decode packets with placeholder generation"
+                ));
+            }
             WhoopGeneration::Gen4 => WhoopData::from_packet_gen4,
             WhoopGeneration::Gen5 => WhoopData::from_packet_gen5,
         };

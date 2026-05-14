@@ -9,7 +9,7 @@ use sea_orm::{
 use uuid::Uuid;
 
 use openwhoop_algos::SleepCycle;
-use openwhoop_codec::HistoryReading;
+use openwhoop_codec::{HistoryReading, constants::WhoopGeneration};
 
 #[derive(Clone)]
 pub struct DatabaseHandler {
@@ -72,11 +72,13 @@ impl DatabaseHandler {
     pub async fn create_packet(
         &self,
         char: Uuid,
+        generation: WhoopGeneration,
         data: Vec<u8>,
     ) -> anyhow::Result<openwhoop_entities::packets::Model> {
         let packet = openwhoop_entities::packets::ActiveModel {
             id: NotSet,
             uuid: Set(char),
+            generation: Set(generation.to_string()),
             bytes: Set(data),
         };
 
@@ -358,13 +360,18 @@ mod tests {
         let uuid = Uuid::new_v4();
         let data = vec![0xAA, 0xBB, 0xCC];
 
-        let packet = db.create_packet(uuid, data.clone()).await.unwrap();
+        let packet = db
+            .create_packet(uuid, WhoopGeneration::Gen5, data.clone())
+            .await
+            .unwrap();
         assert_eq!(packet.uuid, uuid);
+        assert_eq!(packet.generation, WhoopGeneration::Gen5.to_string());
         assert_eq!(packet.bytes, data);
 
         let packets = db.get_packets(0).await.unwrap();
         assert_eq!(packets.len(), 1);
         assert_eq!(packets[0].uuid, uuid);
+        assert_eq!(packets[0].generation, WhoopGeneration::Gen5.to_string());
     }
 
     #[tokio::test]

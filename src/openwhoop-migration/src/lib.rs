@@ -14,6 +14,7 @@ mod m20250602_000001_spo2;
 mod m20250603_000000_skin_temp;
 mod m20260508_000000_strain;
 mod m20260508_000001_activity_strain;
+mod m20260514_000000_packets_generation;
 
 pub struct Migrator;
 
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20250603_000000_skin_temp::Migration),
             Box::new(m20260508_000000_strain::Migration),
             Box::new(m20260508_000001_activity_strain::Migration),
+            Box::new(m20260514_000000_packets_generation::Migration),
         ]
     }
 }

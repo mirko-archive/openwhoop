@@ -313,6 +313,7 @@ where
             false => Ok(Model {
                 id: 0,
                 uuid: notification.uuid,
+                generation: self.generation.to_string(),
                 bytes: notification.value,
             }),
         }
