@@ -22,6 +22,7 @@ pub enum WhoopError {
     Overflow,
     InvalidTime,
     InvalidSliceError,
+    InvalidGeneration,
 }
 
 impl From<TryFromSliceError> for WhoopError {

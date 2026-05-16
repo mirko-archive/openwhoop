@@ -83,12 +83,14 @@ mod tests {
                 from: base,
                 to: base + TimeDelta::hours(1),
                 activity: ActivityType::Running,
+                strain: None,
             },
             ActivityPeriod {
                 period_id: base.date(),
                 from: base + TimeDelta::hours(4),
                 to: base + TimeDelta::hours(5),
                 activity: ActivityType::Cycling,
+                strain: None,
             },
         ];
 

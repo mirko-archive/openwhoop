@@ -2,7 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "activities")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -12,6 +12,8 @@ pub struct Model {
     pub start: DateTime,
     pub end: DateTime,
     pub activity: String,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub strain: Option<f64>,
     pub synced: bool,
 }
 

@@ -61,4 +61,5 @@ pub enum Activities {
     Start,
     End,
     Activity,
+    Strain,
 }

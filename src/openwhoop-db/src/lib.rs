@@ -1,8 +1,7 @@
 mod db;
-pub use db::DatabaseHandler;
+pub use db::{DailyInfo, DailyStats, DailyStatsAverage, DatabaseHandler};
 
 mod algo_impl;
-pub use algo_impl::TempReading;
 pub mod sync;
 mod type_impl;
 

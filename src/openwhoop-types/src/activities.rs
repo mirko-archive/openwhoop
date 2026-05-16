@@ -1,6 +1,7 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, str::FromStr};
+use strum::EnumIter;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ActivityPeriod {
@@ -8,6 +9,7 @@ pub struct ActivityPeriod {
     pub from: NaiveDateTime,
     pub to: NaiveDateTime,
     pub activity: ActivityType,
+    pub strain: Option<f64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -22,7 +24,7 @@ pub enum Category {
     Restorative,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, EnumIter)]
 pub enum ActivityType {
     #[serde(rename = "Activity")]
     Activity = -1,

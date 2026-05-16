@@ -16,7 +16,16 @@ impl StressCalculator {
     pub const MIN_READING_PERIOD: usize = 120;
 
     pub fn calculate_stress(hr: &[ParsedHistoryReading]) -> Option<StressScore> {
-        if hr.len() < Self::MIN_READING_PERIOD {
+        Self::calculate_stress_with_min_reading_period(hr, Self::MIN_READING_PERIOD)
+    }
+
+    pub fn calculate_stress_with_min_reading_period(
+        hr: &[ParsedHistoryReading],
+        min_reading_period: usize,
+    ) -> Option<StressScore> {
+        let min_reading_period = min_reading_period.max(1);
+
+        if hr.len() < min_reading_period {
             return None;
         }
 
@@ -25,7 +34,7 @@ impl StressCalculator {
         // Prefer real RR intervals from the device
         let real_rr: Vec<u16> = hr.iter().flat_map(|r| r.rr.iter().copied()).collect();
 
-        let rr = if real_rr.len() >= Self::MIN_READING_PERIOD {
+        let rr = if real_rr.len() >= min_reading_period {
             real_rr
         } else {
             // Fall back to BPM-derived RR

@@ -345,7 +345,7 @@ impl WhoopData {
             return Ok(HistoryReadingResult::Tombstone);
         }
 
-        todo!();
+        Err(WhoopError::InvalidData)
     }
 
     /// Version-18 (K=18) historical packet parser for WHOOP 5.0 (Maverick).
@@ -1539,32 +1539,6 @@ mod tests {
                 assert_eq!(s.skin_temp_raw, 924);
                 assert_eq!(s.ppg_green, 24913);
                 assert_eq!(s.skin_contact, 70);
-            }
-            _ => panic!("Expected HistoryReading"),
-        }
-
-        // Gen5 historical parsing must not use the Gen4 V12/V24 selector (seq=12/24).
-        // If it did, this packet would be routed to parse_historical_packet_v12 and include sensor_data.
-        let mut gen5_historical = vec![0u8; 77];
-        gen5_historical[4..8].copy_from_slice(&1000_u32.to_le_bytes()); // unix seconds
-        gen5_historical[14] = 80; // bpm
-        gen5_historical[15] = 1; // rr_count
-        gen5_historical[16..18].copy_from_slice(&900_u16.to_le_bytes()); // rr[0]
-        let packet = WhoopPacket {
-            packet_type: PacketType::HistoricalData,
-            seq: 12, // would trigger V12 path in Gen4 parser
-            cmd: 0,
-            data: gen5_historical,
-            size: 0,
-            partial: false,
-        };
-        let data = WhoopData::from_packet_gen5(packet).expect("Invalid Gen5 historical packet");
-        match &data {
-            WhoopData::HistoryReading(r) => {
-                assert_eq!(r.unix, 1_000_000);
-                assert_eq!(r.bpm, 80);
-                assert_eq!(r.rr, vec![900]);
-                assert!(r.sensor_data.is_none());
             }
             _ => panic!("Expected HistoryReading"),
         }

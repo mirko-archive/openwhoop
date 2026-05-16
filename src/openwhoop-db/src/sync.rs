@@ -244,6 +244,7 @@ impl<'a> DatabaseSync<'a> {
                     start: Set(m.start),
                     end: Set(m.end),
                     activity: Set(m.activity),
+                    strain: Set(m.strain),
                     synced: Set(true),
                 })
                 .collect();
@@ -256,6 +257,7 @@ impl<'a> DatabaseSync<'a> {
                         .update_columns([
                             activities::Column::End,
                             activities::Column::Activity,
+                            activities::Column::Strain,
                             activities::Column::PeriodId,
                             activities::Column::Synced,
                         ])
@@ -335,8 +337,8 @@ impl<'a> DatabaseSync<'a> {
                     rr_intervals: Set(m.rr_intervals),
                     activity: Set(m.activity),
                     stress: Set(m.stress),
-                    spo2: Set(m.spo2),
-                    skin_temp: Set(m.skin_temp),
+                    spo2: NotSet,
+                    skin_temp: NotSet,
                     imu_data: Set(m.imu_data),
                     sensor_data: Set(m.sensor_data),
                     synced: Set(true),
@@ -356,14 +358,6 @@ impl<'a> DatabaseSync<'a> {
                         .value(
                             heart_rate::Column::Stress,
                             Expr::cust("COALESCE(excluded.stress, heart_rate.stress)"),
-                        )
-                        .value(
-                            heart_rate::Column::Spo2,
-                            Expr::cust("COALESCE(excluded.spo2, heart_rate.spo2)"),
-                        )
-                        .value(
-                            heart_rate::Column::SkinTemp,
-                            Expr::cust("COALESCE(excluded.skin_temp, heart_rate.skin_temp)"),
                         )
                         .value(
                             heart_rate::Column::ImuData,

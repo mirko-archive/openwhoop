@@ -16,10 +16,4 @@ pub use exercise::ExerciseMetrics;
 pub(crate) mod strain;
 pub use strain::{StrainCalculator, StrainScore};
 
-pub(crate) mod spo2;
-pub use spo2::{SpO2Calculator, SpO2Reading, SpO2Score};
-
-pub(crate) mod temperature;
-pub use temperature::{SkinTempCalculator, SkinTempScore};
-
 pub mod helpers;

@@ -2,6 +2,7 @@ use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
 use openwhoop_codec::ParsedHistoryReading;
 
 use openwhoop_codec::WhoopError;
+use openwhoop_entities::sleep_cycles;
 
 use super::ActivityPeriod;
 
@@ -104,6 +105,44 @@ impl SleepCycle {
         let score = (duration / IDEAL_DURATION) as f64;
 
         (score * 100.0).clamp(0.0, 100.0)
+    }
+}
+
+impl From<sleep_cycles::Model> for SleepCycle {
+    fn from(value: sleep_cycles::Model) -> Self {
+        let sleep_cycles::Model {
+            id: _,
+            sleep_id,
+            start,
+            end,
+            min_bpm,
+            max_bpm,
+            avg_bpm,
+            min_hrv,
+            max_hrv,
+            avg_hrv,
+            score,
+            synced: _,
+        } = value;
+
+        macro_rules! clamp {
+            ($c:expr, $t:ty) => {
+                ($c).clamp(<$t>::MIN as _, <$t>::MAX as _) as $t
+            };
+        }
+
+        Self {
+            id: sleep_id,
+            start,
+            end,
+            min_bpm: clamp!(min_bpm, u8),
+            max_bpm: clamp!(max_bpm, u8),
+            avg_bpm: clamp!(avg_bpm, u8),
+            min_hrv: clamp!(min_hrv, u16),
+            max_hrv: clamp!(max_hrv, u16),
+            avg_hrv: clamp!(avg_hrv, u16),
+            score: score.unwrap_or_else(|| Self::sleep_score(start, end)),
+        }
     }
 }
 

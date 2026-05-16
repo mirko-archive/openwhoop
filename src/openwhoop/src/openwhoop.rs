@@ -1,20 +1,19 @@
-use btleplug::api::ValueNotification;
-use chrono::{DateTime, Local, TimeDelta};
+use chrono::{DateTime, Local, NaiveDate, TimeDelta};
 use openwhoop_codec::{
-    Activity, HistoryReading, WhoopData, WhoopPacket,
+    HistoryReading, WhoopData, WhoopPacket,
     constants::{
         CMD_FROM_STRAP_GEN4, CMD_FROM_STRAP_GEN5, DATA_FROM_STRAP_GEN4, DATA_FROM_STRAP_GEN5,
         MetadataType, WhoopGeneration,
     },
 };
-use openwhoop_db::{DatabaseHandler, SearchHistory};
+use openwhoop_db::{DailyInfo, DailyStats, DailyStatsAverage, DatabaseHandler, SearchHistory};
 use openwhoop_entities::packets;
 
 use crate::{
     algo::{
-        ActivityPeriod, MAX_SLEEP_PAUSE, SkinTempCalculator, SleepCycle, SpO2Calculator,
-        StressCalculator, helpers::format_hm::FormatHM,
+        ActivityPeriod, MAX_SLEEP_PAUSE, SleepCycle, StressCalculator, helpers::format_hm::FormatHM,
     },
+    ble::BleNotification,
     types::activities,
 };
 
@@ -39,11 +38,11 @@ impl OpenWhoop {
 
     pub async fn store_packet(
         &self,
-        notification: ValueNotification,
+        notification: BleNotification,
     ) -> anyhow::Result<packets::Model> {
         let packet = self
             .database
-            .create_packet(notification.uuid, notification.value)
+            .create_packet(notification.uuid, self.generation, notification.value)
             .await?;
 
         Ok(packet)
@@ -53,13 +52,41 @@ impl OpenWhoop {
         &mut self,
         packet: packets::Model,
     ) -> anyhow::Result<Option<WhoopPacket>> {
-        let parse_packet = match self.generation {
-            WhoopGeneration::Placeholder => todo!(),
+        let generation = if matches!(self.generation, WhoopGeneration::Placeholder) {
+            packet
+                .generation
+                .parse()
+                .ok()
+                .or_else(|| match packet.uuid {
+                    DATA_FROM_STRAP_GEN4 | CMD_FROM_STRAP_GEN4 => Some(WhoopGeneration::Gen4),
+                    DATA_FROM_STRAP_GEN5 | CMD_FROM_STRAP_GEN5 => Some(WhoopGeneration::Gen5),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unable to determine packet generation for row {}",
+                        packet.id
+                    )
+                })?
+        } else {
+            self.generation
+        };
+
+        let parse_packet = match generation {
+            WhoopGeneration::Placeholder => {
+                return Err(anyhow::anyhow!(
+                    "cannot decode packets with placeholder generation"
+                ));
+            }
             WhoopGeneration::Gen4 => WhoopPacket::from_data,
             WhoopGeneration::Gen5 => WhoopPacket::from_data_maverick,
         };
-        let data_from_packet = match self.generation {
-            WhoopGeneration::Placeholder => todo!(),
+        let data_from_packet = match generation {
+            WhoopGeneration::Placeholder => {
+                return Err(anyhow::anyhow!(
+                    "cannot decode packets with placeholder generation"
+                ));
+            }
             WhoopGeneration::Gen4 => WhoopData::from_packet_gen4,
             WhoopGeneration::Gen5 => WhoopData::from_packet_gen5,
         };
@@ -168,56 +195,45 @@ impl OpenWhoop {
     }
 
     pub async fn get_latest_sleep(&self) -> anyhow::Result<Option<SleepCycle>> {
-        Ok(self.database.get_latest_sleep().await?.map(map_sleep_cycle))
+        self.database.get_latest_sleep().await
+    }
+
+    pub async fn get_sleep_for_date(&self, date: NaiveDate) -> anyhow::Result<Option<SleepCycle>> {
+        self.database.get_sleep_for_date(date).await
+    }
+
+    pub async fn calculate_latest_strain(&self) -> anyhow::Result<()> {
+        self.database.calculate_latest_strain().await?;
+
+        Ok(())
+    }
+
+    pub async fn get_latest_strain(
+        &self,
+    ) -> anyhow::Result<Option<openwhoop_entities::strain::Model>> {
+        self.database.get_latest_strain().await
+    }
+
+    pub async fn get_strain_for_date(
+        &self,
+        date: NaiveDate,
+    ) -> anyhow::Result<Option<openwhoop_entities::strain::Model>> {
+        self.database.get_strain_for_date(date).await
+    }
+
+    pub async fn get_daily_info(&self, date: NaiveDate) -> anyhow::Result<DailyInfo> {
+        self.database.get_daily_info(date).await
+    }
+
+    pub async fn get_latest_daily_stats(&self) -> anyhow::Result<Option<DailyStats>> {
+        self.database.get_latest_daily_stats().await
+    }
+
+    pub async fn get_last_7_day_daily_stats_average(&self) -> anyhow::Result<DailyStatsAverage> {
+        self.database.get_last_7_day_daily_stats_average().await
     }
 
     pub async fn detect_events(&self) -> anyhow::Result<()> {
-        let latest_activity = self.database.get_latest_activity().await?;
-        let start_from = latest_activity.map(|a| a.from);
-
-        let sleeps = self
-            .database
-            .get_sleep_cycles(start_from)
-            .await?
-            .windows(2)
-            .map(|sleep| (sleep[0].id, sleep[0].end, sleep[1].start))
-            .collect::<Vec<_>>();
-
-        for (cycle_id, start, end) in sleeps {
-            let options = SearchHistory {
-                from: Some(start),
-                to: Some(end),
-                ..Default::default()
-            };
-
-            let history = self.database.search_history(options).await?;
-            let events = ActivityPeriod::detect_from_gravity(&history);
-
-            for event in events {
-                let activity = match event.activity {
-                    Activity::Active => activities::ActivityType::Activity,
-                    Activity::Sleep => activities::ActivityType::Nap,
-                    _ => continue,
-                };
-
-                let activity = activities::ActivityPeriod {
-                    period_id: cycle_id,
-                    from: event.start,
-                    to: event.end,
-                    activity,
-                };
-
-                let duration = activity.to - activity.from;
-                info!(
-                    "Detected activity period from: {} to: {}, duration: {}",
-                    activity.from,
-                    activity.to,
-                    duration.format_hm()
-                );
-                self.database.create_activity(activity).await?;
-            }
-        }
-
         Ok(())
     }
 
@@ -262,6 +278,7 @@ impl OpenWhoop {
                                     from: sleep.start,
                                     to: sleep.end,
                                     activity: activities::ActivityType::Nap,
+                                    strain: None,
                                 };
                                 self.database.create_activity(nap).await?;
                                 continue;
@@ -271,6 +288,7 @@ impl OpenWhoop {
                                     from: last_sleep.start,
                                     to: last_sleep.end,
                                     activity: activities::ActivityType::Nap,
+                                    strain: None,
                                 };
                                 self.database.create_activity(nap).await?;
                             }
@@ -291,60 +309,6 @@ impl OpenWhoop {
             }
 
             break;
-        }
-
-        Ok(())
-    }
-
-    pub async fn calculate_spo2(&self) -> anyhow::Result<()> {
-        loop {
-            let last = self.database.last_spo2_time().await?;
-            let options = SearchHistory {
-                from: last.map(|t| {
-                    t - TimeDelta::seconds(i64::try_from(SpO2Calculator::WINDOW_SIZE).unwrap_or(0))
-                }),
-                to: None,
-                limit: Some(86400),
-            };
-
-            let readings = self.database.search_sensor_readings(options).await?;
-            if readings.is_empty() || readings.len() <= SpO2Calculator::WINDOW_SIZE {
-                break;
-            }
-
-            let scores = readings
-                .windows(SpO2Calculator::WINDOW_SIZE)
-                .filter_map(SpO2Calculator::calculate);
-
-            for score in scores {
-                self.database.update_spo2_on_reading(score).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn calculate_skin_temp(&self) -> anyhow::Result<()> {
-        loop {
-            let readings = self
-                .database
-                .search_temp_readings(SearchHistory {
-                    limit: Some(86400),
-                    ..Default::default()
-                })
-                .await?;
-
-            if readings.is_empty() {
-                break;
-            }
-
-            for reading in &readings {
-                if let Some(score) =
-                    SkinTempCalculator::convert(reading.time, reading.skin_temp_raw)
-                {
-                    self.database.update_skin_temp_on_reading(score).await?;
-                }
-            }
         }
 
         Ok(())
@@ -378,22 +342,5 @@ impl OpenWhoop {
         }
 
         Ok(())
-    }
-}
-
-fn map_sleep_cycle(sleep: openwhoop_entities::sleep_cycles::Model) -> SleepCycle {
-    SleepCycle {
-        id: sleep.end.date(),
-        start: sleep.start,
-        end: sleep.end,
-        min_bpm: sleep.min_bpm.try_into().unwrap(),
-        max_bpm: sleep.max_bpm.try_into().unwrap(),
-        avg_bpm: sleep.avg_bpm.try_into().unwrap(),
-        min_hrv: sleep.min_hrv.try_into().unwrap(),
-        max_hrv: sleep.max_hrv.try_into().unwrap(),
-        avg_hrv: sleep.avg_hrv.try_into().unwrap(),
-        score: sleep
-            .score
-            .unwrap_or_else(|| SleepCycle::sleep_score(sleep.start, sleep.end)),
     }
 }

@@ -4,3 +4,4 @@
 *.sqlite-journal
 /firmware
 /captures
+/dbs

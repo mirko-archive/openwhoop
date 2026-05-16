@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 default-run = "openwhoop"
 
+[features]
+default = []
+tauri-blec = ["dep:tauri-plugin-blec"]
+
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
@@ -28,6 +32,7 @@ sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 strum.workspace = true
+tauri-plugin-blec = { version = "0.8.1", optional = true }
 tokio.workspace = true
 uuid.workspace = true
 zip.workspace = true
